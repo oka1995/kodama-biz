@@ -3,8 +3,8 @@
 // 使い方:
 //   npm install
 //   npm start
-// ユーザに「日付・便名・クラス」を対話的に尋ね、ANA Chatに自動投入して
-// 空席待ち人数の応答を取得します。
+// ブラウザ上の簡素な入力フォームに「日付・便名・クラス」を入れると、
+// その後ANA Chatに自動投入して空席待ち人数の応答を取得します。
 //
 // 環境変数:
 //   HEADLESS=1   ヘッドレス実行（既定はheadedで画面表示あり）
@@ -13,8 +13,6 @@
 //   START_URL    開始URL（既定はANA国際線特典航空券の規約ページ）
 
 import { chromium } from 'playwright';
-import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -27,57 +25,108 @@ const SHOTS_DIR = path.resolve('screenshots');
 
 const CLASSES = ['エコノミー', 'プレミアムエコノミー', 'ビジネス', 'ファースト'];
 
-// ---------- 入力フェーズ ----------
-async function promptInputs() {
-  const rl = readline.createInterface({ input, output });
-  try {
-    console.log('--- ANA国際線 空席待ち人数 照会 ---');
-    const dateRaw = (await rl.question('搭乗日 (YYYY/M/D 例 2026/7/15): ')).trim();
-    const date = normalizeDate(dateRaw);
-    if (!date) throw new Error(`日付の形式が不正です: ${dateRaw}`);
-
-    const flightRaw = (await rl.question('便名 (例 NH211): ')).trim();
-    const flight = normalizeFlight(flightRaw);
-    if (!flight) throw new Error(`便名の形式が不正です: ${flightRaw}`);
-
-    console.log('クラス:');
-    CLASSES.forEach((c, i) => console.log(`  ${i + 1}) ${c}`));
-    const cabinRaw = (await rl.question('番号 または クラス名: ')).trim();
-    const cabin = normalizeCabin(cabinRaw);
-    if (!cabin) throw new Error(`クラスの指定が不正です: ${cabinRaw}`);
-
-    console.log(`\n入力内容: ${date} / ${flight} / ${cabin}`);
-    const ok = (await rl.question('この内容で実行しますか? [y/N]: ')).trim().toLowerCase();
-    if (ok !== 'y' && ok !== 'yes') {
-      console.log('中止しました。');
-      process.exit(0);
-    }
-    return { date, flight, cabin };
-  } finally {
-    rl.close();
-  }
-}
-
+// ---------- 入力検証 ----------
 function normalizeDate(s) {
-  // YYYY/M/D, YYYY/MM/DD, YYYY-M-D 等を受け付け、YYYY/M/D に揃える
-  const m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+  // YYYY/M/D, YYYY-MM-DD 等を受け付け、YYYY/M/D に揃える
+  const m = String(s).match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
   if (!m) return null;
   const [, y, mo, d] = m;
   const yy = Number(y), mm = Number(mo), dd = Number(d);
   if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
   return `${yy}/${mm}/${dd}`;
 }
-
 function normalizeFlight(s) {
-  const m = s.toUpperCase().replace(/\s+/g, '').match(/^NH(\d{1,4})$/);
-  if (!m) return null;
-  return `NH${m[1]}`;
+  const m = String(s).toUpperCase().replace(/\s+/g, '').match(/^NH(\d{1,4})$/);
+  return m ? `NH${m[1]}` : null;
+}
+function normalizeCabin(s) {
+  return CLASSES.includes(s) ? s : null;
 }
 
-function normalizeCabin(s) {
-  if (/^[1-4]$/.test(s)) return CLASSES[Number(s) - 1];
-  if (CLASSES.includes(s)) return s;
-  return null;
+// ---------- 入力フォーム（ブラウザ上に表示） ----------
+const FORM_HTML = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>ANA空席待ち人数 照会</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif;
+         margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #f5f6f8; color: #1a1a1a; }
+  .card { background: #fff; padding: 32px 36px; border-radius: 12px;
+          box-shadow: 0 4px 16px rgba(0,0,0,.08); width: 420px; }
+  h1 { font-size: 18px; margin: 0 0 20px; color: #003a70; }
+  label { display: block; font-size: 13px; margin: 14px 0 6px; color: #444; }
+  input[type=date], input[type=text] {
+    width: 100%; padding: 10px 12px; font-size: 15px; box-sizing: border-box;
+    border: 1px solid #ccc; border-radius: 6px;
+  }
+  .radios { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-top: 4px; }
+  .radios label { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 14px; }
+  button { margin-top: 22px; width: 100%; padding: 11px; font-size: 15px;
+           background: #003a70; color: #fff; border: 0; border-radius: 6px;
+           cursor: pointer; }
+  button:hover { background: #00528f; }
+  button:disabled { background: #999; cursor: default; }
+  .err { color: #c62828; font-size: 12px; min-height: 16px; margin-top: 10px; }
+  .hint { font-size: 11px; color: #888; }
+</style></head>
+<body>
+  <form class="card" id="f">
+    <h1>ANA国際線 空席待ち人数 照会</h1>
+
+    <label for="d">搭乗日</label>
+    <input id="d" type="date" required>
+
+    <label for="fl">便名 <span class="hint">例: NH211</span></label>
+    <input id="fl" type="text" required pattern="^[Nn][Hh]\\d{1,4}$" placeholder="NH211">
+
+    <label>クラス</label>
+    <div class="radios">
+      ${CLASSES.map((c, i) => `
+        <label><input type="radio" name="cabin" value="${c}" ${i === 0 ? 'checked' : ''}>${c}</label>
+      `).join('')}
+    </div>
+
+    <button type="submit" id="go">この内容で照会する</button>
+    <div class="err" id="err"></div>
+  </form>
+<script>
+  const f = document.getElementById('f');
+  const err = document.getElementById('err');
+  const btn = document.getElementById('go');
+  f.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    err.textContent = '';
+    const dateIso = document.getElementById('d').value; // YYYY-MM-DD
+    const flight = document.getElementById('fl').value.trim().toUpperCase();
+    const cabin = document.querySelector('input[name=cabin]:checked')?.value;
+    if (!dateIso) { err.textContent = '日付を入力してください'; return; }
+    const [yy, mm, dd] = dateIso.split('-').map(Number);
+    const date = yy + '/' + mm + '/' + dd;
+    if (!/^NH\\d{1,4}$/.test(flight)) { err.textContent = '便名は NH + 数字（例 NH211）で入力'; return; }
+    if (!cabin) { err.textContent = 'クラスを選択してください'; return; }
+    btn.disabled = true; btn.textContent = '送信中...';
+    await window.__submitInputs({ date, flight, cabin });
+  });
+</script>
+</body></html>`;
+
+async function promptInputsInBrowser(page) {
+  // ページ側からNodeへ値を渡すための関数を公開
+  let resolveInputs;
+  const got = new Promise((r) => { resolveInputs = r; });
+  await page.exposeFunction('__submitInputs', async (data) => {
+    resolveInputs(data);
+  });
+  await page.setContent(FORM_HTML, { waitUntil: 'load' });
+  const data = await got;
+
+  const date = normalizeDate(data.date);
+  const flight = normalizeFlight(data.flight);
+  const cabin = normalizeCabin(data.cabin);
+  if (!date || !flight || !cabin) {
+    throw new Error(`入力値が不正です: ${JSON.stringify(data)}`);
+  }
+  return { date, flight, cabin };
 }
 
 // ---------- ブラウザ操作 ----------
@@ -113,7 +162,6 @@ async function sendMessage(target, text) {
   await locator.click();
   await locator.fill('');
   await locator.type(text, { delay: 30 });
-  // まずEnterで送信を試行
   await locator.press('Enter');
   // Enterで送れないUI向けに、近くの送信ボタンも試す（任意）
   const sendBtn = frame.locator(
@@ -125,7 +173,6 @@ async function sendMessage(target, text) {
 }
 
 async function captureFrameText(frame) {
-  // チャットフレーム内の可視テキストをまるごと取得（最終応答抽出のため）
   return await frame.evaluate(() => document.body?.innerText || '');
 }
 
@@ -140,8 +187,8 @@ async function shot(page, name) {
   }
 }
 
-async function run({ date, flight, cabin }) {
-  console.log(`\n[1/8] ブラウザ起動 (headless=${HEADLESS})`);
+async function run() {
+  console.log(`[1/9] ブラウザ起動 (headless=${HEADLESS})`);
   const browser = await chromium.launch({ headless: HEADLESS });
   const context = await browser.newContext({
     locale: 'ja-JP',
@@ -153,12 +200,16 @@ async function run({ date, flight, cabin }) {
   const page = await context.newPage();
 
   try {
-    console.log(`[2/8] ページを開く: ${START_URL}`);
+    console.log('[2/9] 入力フォームを表示（ブラウザに入力してください）');
+    const { date, flight, cabin } = await promptInputsInBrowser(page);
+    console.log(`  ✓ 入力受領: ${date} / ${flight} / ${cabin}`);
+
+    console.log(`[3/9] ANAページを開く: ${START_URL}`);
     await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-    await page.waitForTimeout(3_000); // チャットがインしてくるのを待つ
+    await page.waitForTimeout(3_000);
     await shot(page, '01_loaded');
 
-    console.log('[3/8] チャット入力欄を探索');
+    console.log('[4/9] チャット入力欄を探索');
     const target = await findChatInput(page);
     console.log(`  ✓ 入力欄を検出 (selector: ${target.selectorUsed})`);
     await shot(page, '02_chat_open');
@@ -173,19 +224,18 @@ async function run({ date, flight, cabin }) {
 
     for (let i = 0; i < sequence.length; i++) {
       const { label, text } = sequence[i];
-      console.log(`[${4 + i}/8] 入力: ${label} = "${text}"`);
+      console.log(`[${5 + i}/9] 入力: ${label} = "${text}"`);
       await sendMessage(target, text);
       await page.waitForTimeout(STEP_WAIT_MS);
       await shot(page, `step${i + 1}_${label}`);
     }
 
-    console.log(`[8/8] 最終応答を待機 (${FINAL_WAIT_MS}ms)`);
+    console.log(`[最終] 応答を待機 (${FINAL_WAIT_MS}ms)`);
     await page.waitForTimeout(FINAL_WAIT_MS);
     await shot(page, '99_final');
 
     const text = await captureFrameText(target.frame);
     console.log('\n========== チャット最終内容（末尾） ==========');
-    // ノイズ低減のため末尾の数十行のみ表示
     const tail = text.split('\n').slice(-40).join('\n');
     console.log(tail);
     console.log('==============================================');
@@ -203,6 +253,4 @@ async function run({ date, flight, cabin }) {
   }
 }
 
-// ---------- エントリポイント ----------
-const inputs = await promptInputs();
-await run(inputs);
+await run();
