@@ -82,21 +82,26 @@ function normalizeCabin(s) {
 
 // ---------- ブラウザ操作 ----------
 async function findChatInput(page, timeoutMs = 30_000) {
-  // チャットウィジェットは iframe 内の可能性が高い。
-  // ページ・全フレームから「表示されている textbox / textarea / 入力可能な
-  // contenteditable」を一定時間ポーリングで探す。
+  // ANA Chatの入力欄は <textarea id="typing-text-area" class="typing-text-area">。
+  // メインページ・全iframe を横断し、まずIDで、次に汎用セレクタで探索する。
+  const SELECTORS = [
+    'textarea#typing-text-area',
+    'textarea.typing-text-area',
+    'textarea[placeholder*="質問"]',
+    'textarea:visible, input[type="text"]:visible, [role="textbox"]:visible, [contenteditable="true"]:visible',
+  ];
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const candidates = [page, ...page.frames()];
     for (const ctx of candidates) {
-      try {
-        const loc = ctx.locator(
-          'textarea:visible, input[type="text"]:visible, [role="textbox"]:visible, [contenteditable="true"]:visible'
-        ).first();
-        if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
-          return { frame: ctx, locator: loc };
-        }
-      } catch { /* ignore frame churn */ }
+      for (const sel of SELECTORS) {
+        try {
+          const loc = ctx.locator(sel).first();
+          if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
+            return { frame: ctx, locator: loc, selectorUsed: sel };
+          }
+        } catch { /* ignore frame churn */ }
+      }
     }
     await page.waitForTimeout(500);
   }
@@ -155,7 +160,7 @@ async function run({ date, flight, cabin }) {
 
     console.log('[3/8] チャット入力欄を探索');
     const target = await findChatInput(page);
-    console.log('  ✓ 入力欄を検出');
+    console.log(`  ✓ 入力欄を検出 (selector: ${target.selectorUsed})`);
     await shot(page, '02_chat_open');
 
     const sequence = [
